@@ -64,7 +64,7 @@
 #define delayMicroseconds(value) _delay_us(value);
 #define sbi(register,bit) (register|=(1<<bit))
 #define cbi(register,bit) (register&=~(1<<bit))
-const uint8_t LITTLE_WIRE_VERSION = 0x13;	
+const uint8_t LITTLE_WIRE_VERSION = 0x15;	
 enum
 {
 	// Generic requests
@@ -169,6 +169,12 @@ static uint8_t ws2812_mask;
 static uint8_t ws2812_ptr=0;
 
 // ----------------------------------------------------------------------
+#define MAX_433_BITS (64)
+static uint8_t rf433_buffer[8];
+static uint8_t rf433_mask;
+static uint8_t rf433_length;
+
+
 
 #if 0
 // MCLR	0x04 (100)  => SCK 	-pin2
@@ -348,29 +354,12 @@ uchar usbFunctionRead(uchar *data, uchar len)
 // ----------------------------------------------------------------------
 uchar usbFunctionWrite(uchar *data, uchar len)
 {
-	uchar	i;
-	unsigned	usec;
-	uchar	r;
-	//uchar	last = (len != 8);
-
-	for	( i = 0; i < len; i++ )
-	{
-		cmd[3] = data[i];
-		spi_rw();
-		cmd[0] ^= 0x60;	// turn write into read
-		//
-		for	( usec = 0; usec < timeout; usec += 32 * sck_period )
-		{	// when timeout > 0, poll until byte is written
-			spi( cmd, res );
-			r = res[3];
-			if	( r == cmd[3] && r != poll1 && r != poll2 )
-			{
-				break;
-			}
+	if(jobState==18) {
+		for(uint8_t i = 0; i<len && i<8; i++) {
+			rf433_buffer[i]=data[i];
 		}
-		//
+		jobState=19;
 	}
-	//return last;
 	return 1;
 }
 
@@ -827,6 +816,16 @@ uchar	usbFunctionSetup(uchar data[8])
 		
 		return 0;		
 	}
+	if (req == 56) { // rf 433 mhz
+		// (data[2])>>3  can be used to determine some more RF 433MHZ protocols in the future
+		rf433_mask = mask;
+		rf433_length = data[4];
+		rf433_length = rf433_length <= MAX_433_BITS ? rf433_length : MAX_433_BITS;
+		DDR |= mask;
+
+		jobState=18;
+		return USB_NO_MSG;
+	}
 #if 0 
 	if ((req & 0xF0) == 0xD0) /* pic24f send bytes */
 	{
@@ -1065,6 +1064,28 @@ unsigned char I2C_Read( unsigned char ack )
 }
 // ----------------------------------------------------------------------------
 
+void send433one() {
+	PORT |= rf433_mask;
+    delayMicroseconds(157 * 3);
+    PORT &= ~(rf433_mask);
+    delayMicroseconds(157);
+}
+void send433zero() {
+	PORT |= (rf433_mask);
+    delayMicroseconds(157);
+    PORT &= ~(rf433_mask);
+    delayMicroseconds(157 * 3);
+}
+
+void send433Key() {
+	for(uint8_t i = 0; i < rf433_length; i++) {
+		if (((rf433_buffer[i/8] << (i%8)) & 128) == 0) {
+			send433zero();
+		} else {
+			send433one();
+		}
+	}
+}
 
 // ----------------------------------------------------------------------------
 
@@ -1380,6 +1401,16 @@ int main(void) {
 					ws2812_sendarray_mask(ws2812_grb,ws2812_ptr,ws2812_mask);	  //mask=1<<(data[2]&7)					
 					ws2812_ptr=0;
 				}				
+				jobState=0;
+			break;
+					
+			case 18:
+				break; //waiting for OUT packet	
+			case 19: /* rf433 send */
+				_delay_ms(1); // Hack: Make sure USB communication has finished before atomic block.
+				ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+					send433Key();
+				}
 				jobState=0;
 			break;
 						
